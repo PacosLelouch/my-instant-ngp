@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
 	ValueFlag<string> mode_flag{
 		parser,
 		"MODE",
-		"Mode can be 'nerf', 'sdf', or 'image' or 'volume'. Inferred from the scene if unspecified.",
+		"Mode can be 'nerf', 'sdf', 'image', 'volume', or 'neus'. Inferred from the scene if unspecified.",
 		{'m', "mode"},
 	};
 
@@ -158,8 +158,10 @@ int main(int argc, char** argv) {
 				mode = ETestbedMode::Image;
 			} else if (equals_case_insensitive(mode_str, "volume")) {
 				mode = ETestbedMode::Volume;
+			} else if (equals_case_insensitive(mode_str, "neus")) { // New "neus"
+				mode = ETestbedMode::Neus;
 			} else {
-				tlog::error() << "Mode must be one of 'nerf', 'sdf', 'image', and 'volume'.";
+				tlog::error() << "Mode must be one of 'nerf', 'sdf', 'image', 'volume', and 'neus'.";
 				return 1;
 			}
 		}
@@ -181,6 +183,7 @@ int main(int argc, char** argv) {
 			case ETestbedMode::Sdf:    mode_str = "sdf";    break;
 			case ETestbedMode::Image:  mode_str = "image";  break;
 			case ETestbedMode::Volume: mode_str = "volume"; break;
+			case ETestbedMode::Neus:   mode_str = "neus";   break; // New "neus"
 		}
 
 		if (snapshot_flag) {

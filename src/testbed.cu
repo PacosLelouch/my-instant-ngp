@@ -18,6 +18,7 @@
 #include <neural-graphics-primitives/marching_cubes.h>
 #include <neural-graphics-primitives/nerf_loader.h>
 #include <neural-graphics-primitives/nerf_network.h>
+#include <neural-graphics-primitives/neus_network.h>
 #include <neural-graphics-primitives/render_buffer.h>
 #include <neural-graphics-primitives/takikawa_encoding.cuh>
 #include <neural-graphics-primitives/testbed.h>
@@ -95,6 +96,7 @@ void Testbed::load_training_data(const std::string& data_path) {
 		case ETestbedMode::Sdf:   load_mesh(); break;
 		case ETestbedMode::Image: load_image(); break;
 		case ETestbedMode::Volume:load_volume(); break;
+		case ETestbedMode::Neus:  load_neus(); break; // New load_neus.
 		default: throw std::runtime_error{"Invalid testbed mode."};
 	}
 
@@ -1755,6 +1757,7 @@ Testbed::NetworkDims Testbed::network_dims() const {
 		case ETestbedMode::Sdf:    return network_dims_sdf(); break;
 		case ETestbedMode::Image:  return network_dims_image(); break;
 		case ETestbedMode::Volume: return network_dims_volume(); break;
+		case ETestbedMode::Neus:   return network_dims_neus(); break; // New Neus.
 		default: throw std::runtime_error{"Invalid mode."};
 	}
 }
@@ -1778,6 +1781,20 @@ void Testbed::reset_network() {
 
 	m_nerf.training.reset_camera_extrinsics();
 
+	// Begin: New m_neus.
+
+	m_neus.training.counters_rgb.rays_per_batch = 1 << 12;
+	m_neus.training.counters_rgb.measured_batch_size_before_compaction = 0;
+	m_neus.training.n_steps_since_cam_update = 0;
+	m_neus.training.n_steps_since_error_map_update = 0;
+	m_neus.training.n_rays_since_error_map_update = 0;
+	m_neus.training.n_steps_between_error_map_updates = 128;
+	m_neus.training.error_map.is_cdf_valid = false;
+
+	m_nerf.training.reset_camera_extrinsics();
+
+	// End: New m_neus.
+
 	m_loss_graph_samples = 0;
 
 	// Default config
@@ -1798,6 +1815,17 @@ void Testbed::reset_network() {
 		// the tcnn::Loss in any case.
 		loss_config["otype"] = "L2";
 	}
+
+	// Begin: New Neus.
+	if (m_testbed_mode == ETestbedMode::Neus) {
+		m_neus.training.loss_type = string_to_loss_type(loss_config.value("otype", "L2"));
+
+		// Some of the Neus-supported losses are not supported by tcnn::Loss,
+		// so just create a dummy L2 loss there. The NeUS code path will bypass
+		// the tcnn::Loss in any case.
+		loss_config["otype"] = "L2";
+	}
+	// End: New Neus.
 
 	// Automatically determine certain parameters if we're dealing with the (hash)grid encoding
 	if (to_lower(encoding_config.value("otype", "OneBlob")).find("grid") != std::string::npos) {
@@ -1905,6 +1933,61 @@ void Testbed::reset_network() {
 			m_distortion.optimizer.reset(create_optimizer<float>(distortion_map_optimizer_config));
 			m_distortion.trainer = std::make_shared<Trainer<float, float>>(m_distortion.map, m_distortion.optimizer, std::shared_ptr<Loss<float>>{create_loss<float>(loss_config)}, m_seed);
 		}
+	} else if (m_testbed_mode == ETestbedMode::Neus) { // New Neus.
+		m_neus.training.cam_exposure.resize(m_neus.training.dataset.n_images, AdamOptimizer<Array3f>(1e-3f));
+		m_neus.training.cam_pos_offset.resize(m_neus.training.dataset.n_images, AdamOptimizer<Vector3f>(1e-4f));
+		m_neus.training.cam_rot_offset.resize(m_neus.training.dataset.n_images, RotationAdamOptimizer(1e-4f));
+		m_neus.training.cam_focal_length_offset = AdamOptimizer<Vector2f>(1e-5f);
+
+		json& dir_encoding_config = config["dir_encoding"];
+		json& rgb_network_config = config["rgb_network"];
+
+		uint32_t n_dir_dims = 3;
+		uint32_t n_extra_dims = m_neus.training.dataset.has_light_dirs ? 3u : 0u;
+		m_network = m_neus_network = std::make_shared<ngp_neus::NeusNetwork<precision_t>>(
+			dims.n_pos,
+			n_dir_dims,
+			n_extra_dims,
+			dims.n_pos + 1, // The offset of 1 comes from the dt member variable of NerfCoordinate. HACKY
+			encoding_config,
+			dir_encoding_config,
+			network_config,
+			rgb_network_config
+			);
+
+		m_encoding = m_neus_network->encoding();
+		n_encoding_params = m_encoding->n_params() + m_neus_network->dir_encoding()->n_params();
+
+		tlog::info()
+			<< "Density model: " << dims.n_pos
+			<< "--[" << std::string(encoding_config["otype"])
+			<< "]-->" << m_neus_network->encoding()->padded_output_width()
+			<< "--[" << std::string(network_config["otype"])
+			<< "(neurons=" << (int)network_config["n_neurons"] << ",layers=" << ((int)network_config["n_hidden_layers"]+2) << ")"
+			<< "]-->" << 1
+			;
+
+		tlog::info()
+			<< "Color model:   " << n_dir_dims
+			<< "--[" << std::string(dir_encoding_config["otype"])
+			<< "]-->" << m_neus_network->dir_encoding()->padded_output_width() << "+" << network_config.value("n_output_dims", 16u)
+			<< "--[" << std::string(rgb_network_config["otype"])
+			<< "(neurons=" << (int)rgb_network_config["n_neurons"] << ",layers=" << ((int)rgb_network_config["n_hidden_layers"]+2) << ")"
+			<< "]-->" << 3
+			;
+
+		// Create distortion map model
+		{
+			json& distortion_map_optimizer_config =  config.contains("distortion_map") && config["distortion_map"].contains("optimizer") ? config["distortion_map"]["optimizer"] : optimizer_config;
+
+			m_distortion.resolution = Vector2i::Constant(32);
+			if (config.contains("distortion_map") && config["distortion_map"].contains("resolution")) {
+				from_json(config["distortion_map"]["resolution"], m_distortion.resolution);
+			}
+			m_distortion.map = std::make_shared<TrainableBuffer<2, 2, float>>(m_distortion.resolution);
+			m_distortion.optimizer.reset(create_optimizer<float>(distortion_map_optimizer_config));
+			m_distortion.trainer = std::make_shared<Trainer<float, float>>(m_distortion.map, m_distortion.optimizer, std::shared_ptr<Loss<float>>{create_loss<float>(loss_config)}, m_seed);
+		}
 	} else {
 		uint32_t alignment = network_config.contains("otype") && (equals_case_insensitive(network_config["otype"], "FullyFusedMLP") || equals_case_insensitive(network_config["otype"], "MegakernelMLP")) ? 16u : 8u;
 
@@ -1966,6 +2049,10 @@ void Testbed::reset_network() {
 
 		if (m_nerf.training.dataset.envmap_data.data()) {
 			m_envmap.trainer->set_params_full_precision(m_nerf.training.dataset.envmap_data.data(), m_nerf.training.dataset.envmap_data.size());
+		}
+		// New Neus.
+		if (m_neus.training.dataset.envmap_data.data()) {
+			m_envmap.trainer->set_params_full_precision(m_neus.training.dataset.envmap_data.data(), m_neus.training.dataset.envmap_data.size());
 		}
 	}
 }
@@ -2048,6 +2135,7 @@ void Testbed::train(uint32_t n_training_steps, uint32_t batch_size) {
 			case ETestbedMode::Sdf:   training_prep_sdf(batch_size, n_training_steps, m_training_stream);   break;
 			case ETestbedMode::Image: training_prep_image(batch_size, n_training_steps, m_training_stream); break;
 			case ETestbedMode::Volume:training_prep_volume(batch_size, n_training_steps, m_training_stream); break;
+			case ETestbedMode::Neus:  training_prep_neus(batch_size, n_training_steps, m_training_stream);  break; // New training_prep_neus.
 			default: throw std::runtime_error{"Invalid training mode."};
 		}
 
@@ -2074,6 +2162,7 @@ void Testbed::train(uint32_t n_training_steps, uint32_t batch_size) {
 			case ETestbedMode::Sdf:    train_sdf(batch_size, n_training_steps, m_training_stream);    break;
 			case ETestbedMode::Image:  train_image(batch_size, n_training_steps, m_training_stream);  break;
 			case ETestbedMode::Volume: train_volume(batch_size, n_training_steps, m_training_stream); break;
+			case ETestbedMode::Neus:   train_neus(batch_size, n_training_steps, m_training_stream);   break; // New train_neus.
 			default: throw std::runtime_error{"Invalid training mode."};
 		}
 
@@ -2229,6 +2318,12 @@ void Testbed::render_frame(const Matrix<float, 3, 4>& camera_matrix0, const Matr
 		case ETestbedMode::Volume:
 			render_volume(render_buffer, focal_length, camera_matrix0, screen_center, m_inference_stream);
 			break;
+		// New Neus.
+		case ETestbedMode::Neus:
+			if (!m_render_ground_truth) {
+				render_neus(render_buffer, max_res, focal_length, camera_matrix0, camera_matrix1, nerf_rolling_shutter, screen_center, m_inference_stream);
+			}
+			break;
 		default:
 			throw std::runtime_error{"Invalid render mode."};
 	}
@@ -2241,6 +2336,7 @@ void Testbed::render_frame(const Matrix<float, 3, 4>& camera_matrix0, const Matr
 		auto res = render_buffer.in_resolution();
 
 		bool distortion = m_testbed_mode == ETestbedMode::Nerf && m_nerf.render_with_camera_distortion;
+		distortion = distortion || (m_testbed_mode == ETestbedMode::Neus && m_neus.render_with_camera_distortion); // New neus.
 
 		const dim3 threads = { 16, 8, 1 };
 		const dim3 blocks = { div_round_up((uint32_t)res.x(), threads.x), div_round_up((uint32_t)res.y(), threads.y), 1 };
@@ -2311,6 +2407,46 @@ void Testbed::render_frame(const Matrix<float, 3, 4>& camera_matrix0, const Matr
 			size_t reduce_size = aligned_err_data_e - aligned_err_data_s;
 			reduce_sum(aligned_err_data_s, [reduce_size] __device__ (float val) { return max(val,0.f) / (reduce_size); }, average_error.data(), reduce_size, m_inference_stream);
 			render_buffer.overlay_false_color(m_nerf.training.dataset.image_resolution, to_srgb, m_fov_axis, m_inference_stream, err_data, error_map_res, average_error.data(), m_nerf.training.error_overlay_brightness, m_render_ground_truth);
+		}
+	}
+
+	// New Neus.
+	if (m_testbed_mode == ETestbedMode::Neus) {
+		// Overlay the ground truth image if requested
+		if (m_render_ground_truth) {
+			float alpha=1.f;
+			render_buffer.overlay_image(
+				alpha,
+				Array3f::Constant(m_exposure) + m_neus.training.cam_exposure[m_neus.training.view].variable(),
+				m_background_color,
+				to_srgb ? EColorSpace::SRGB : EColorSpace::Linear,
+				m_neus.training.dataset.images_data.data() + m_neus.training.view * (size_t)m_neus.training.dataset.image_resolution.prod() * 4,
+				m_neus.training.dataset.image_resolution,
+				m_fov_axis,
+				m_zoom,
+				Vector2f::Constant(0.5f),
+				m_inference_stream
+			);
+		}
+
+		// Visualize the accumulated error map if requested
+		if (m_neus.training.render_error_overlay) {
+			const float* err_data = m_neus.training.error_map.data.data();
+			Vector2i error_map_res = m_neus.training.error_map.resolution;
+			if (m_render_ground_truth) {
+				err_data = m_neus.training.dataset.sharpness_data.data();
+				error_map_res = m_neus.training.dataset.sharpness_resolution;
+			}
+			size_t emap_size = error_map_res.x() * error_map_res.y();
+			err_data += emap_size * m_neus.training.view;
+			static GPUMemory<float> average_error;
+			average_error.enlarge(1);
+			average_error.memset(0);
+			const float* aligned_err_data_s = (const float*)(((size_t)err_data)&~15);
+			const float* aligned_err_data_e = (const float*)(((size_t)(err_data+emap_size))&~15);
+			size_t reduce_size = aligned_err_data_e - aligned_err_data_s;
+			reduce_sum(aligned_err_data_s, [reduce_size] __device__ (float val) { return max(val,0.f) / (reduce_size); }, average_error.data(), reduce_size, m_inference_stream);
+			render_buffer.overlay_false_color(m_neus.training.dataset.image_resolution, to_srgb, m_fov_axis, m_inference_stream, err_data, error_map_res, average_error.data(), m_neus.training.error_overlay_brightness, m_render_ground_truth);
 		}
 	}
 

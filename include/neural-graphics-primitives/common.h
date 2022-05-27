@@ -37,6 +37,9 @@
 #define NGP_NAMESPACE_BEGIN namespace ngp {
 #define NGP_NAMESPACE_END }
 
+#define NGP_NEUS_NAMESPACE_BEGIN namespace ngp_neus {
+#define NGP_NEUS_NAMESPACE_END }
+
 #if defined(__CUDA_ARCH__)
 	#if defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
 		#define NGP_PRAGMA_UNROLL _Pragma("unroll")
@@ -149,6 +152,7 @@ enum class ETestbedMode : int {
 	Sdf,
 	Image,
 	Volume,
+	Neus, // New "neus"
 };
 
 struct Ray {
