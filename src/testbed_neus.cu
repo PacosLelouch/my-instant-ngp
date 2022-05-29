@@ -61,7 +61,7 @@ inline constexpr __device__ float MAX_CONE_STEPSIZE() { return STEPSIZE() * (1<<
 inline constexpr __device__ uint32_t N_MAX_RANDOM_SAMPLES_PER_RAY() { return 8; }
 
 // Any alpha below this is considered "invisible" and is thus culled away.
-inline constexpr __device__ float NERF_MIN_OPTICAL_THICKNESS() { return 0.01f; }
+inline constexpr __device__ float NEUS_MIN_OPTICAL_THICKNESS() { return 0.01f; }
 
 static constexpr uint32_t MARCH_ITER = 10000;
 
@@ -359,7 +359,7 @@ __global__ void extract_srgb_with_activation(const uint32_t n_elements,	const ui
 	rgb[elem_idx*rgb_stride + dim_idx] = c;
 }
 
-
+// TODO: density grid -> s grid?
 __global__ void mark_untrained_density_grid(const uint32_t n_elements,  float* __restrict__ grid_out,
 	const uint32_t n_training_images,
 	const TrainingImageMetadata* __restrict__ metadata,
@@ -522,7 +522,7 @@ __global__ void grid_samples_half_to_float(const uint32_t n_elements, BoundingBo
 	if (grid_in) {
 		Vector3f pos = unwarp_position(coords_in[i].p, aabb);
 		float grid_density = cascaded_grid_at(pos, grid_in, mip_from_pos(pos));
-		if (grid_density < NERF_MIN_OPTICAL_THICKNESS()) {
+		if (grid_density < NEUS_MIN_OPTICAL_THICKNESS()) {
 			mlp = -10000.f;
 		}
 	}
@@ -570,7 +570,7 @@ __global__ void grid_to_bitfield(const uint32_t n_elements,
 
 	uint8_t bits = 0;
 
-	float thresh = std::min(NERF_MIN_OPTICAL_THICKNESS(), *mean_density_ptr);
+	float thresh = std::min(NEUS_MIN_OPTICAL_THICKNESS(), *mean_density_ptr);
 
 #pragma unroll
 	for (uint8_t j = 0; j < 8; ++j) {
@@ -1311,7 +1311,7 @@ inline __device__ Array4f read_rgba(Vector2f pos, const Vector2i& resolution, ui
 	return read_val(image_pos(pos, resolution));
 }
 
-// TODO: compute loss.
+// TODO: TODO: compute loss. May change arguments.
 __global__ void compute_loss_kernel_train_neus(
 	const uint32_t n_rays,
 	BoundingBox aabb,
@@ -1390,7 +1390,7 @@ __global__ void compute_loss_kernel_train_neus(
 		const Vector3f pos = unwarp_position(coords_in.ptr->pos.p, aabb);
 		const float dt = unwarp_dt(coords_in.ptr->dt);
 
-		// TODO: Not density, but s.
+		// TODO: TODO: Not density, but s (single variance). Change to NeUS to compute weight!
 		float density = network_to_density(float(local_network_output[3]), density_activation);
 
 
@@ -1520,7 +1520,7 @@ __global__ void compute_loss_kernel_train_neus(
 	loss_scale /= n_rays;
 
 	const float output_l2_reg = rgb_activation == ENerfActivation::Exponential ? 1e-4f : 0.0f;
-	const float output_l1_reg_density = *mean_density_ptr < NERF_MIN_OPTICAL_THICKNESS() ? 1e-4f : 0.0f;
+	const float output_l1_reg_density = *mean_density_ptr < NEUS_MIN_OPTICAL_THICKNESS() ? 1e-4f : 0.0f;
 
 	// now do it again computing gradients
 	Array3f rgb_ray2 = { 0.f,0.f,0.f };
@@ -2641,7 +2641,7 @@ void Testbed::update_density_grid_neus(float decay, uint32_t n_uniform_density_g
 			density_grid_positions+n_uniform_density_grid_samples,
 			density_grid_indices+n_uniform_density_grid_samples,
 			m_neus.max_cascade+1,
-			NERF_MIN_OPTICAL_THICKNESS()
+			NEUS_MIN_OPTICAL_THICKNESS()
 		);
 		m_rng.advance();
 
@@ -3054,7 +3054,7 @@ void Testbed::train_neus_step(uint32_t target_batch_size, uint32_t n_rays_per_ba
 	if (hg_enc) {
 		hg_enc->set_max_level_gpu(m_max_level_rand_training ? max_level_compacted : nullptr);
 	}
-
+	//TODO
 	linear_kernel(compute_loss_kernel_train_neus, 0, stream,
 		n_rays_per_batch,
 		m_aabb,

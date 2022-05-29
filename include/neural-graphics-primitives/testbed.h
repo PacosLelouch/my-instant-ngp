@@ -804,7 +804,7 @@ public:
 
 		} training = {};
 
-		tcnn::GPUMemory<float> density_grid; // NERF_GRIDSIZE()^3 grid of EMA smoothed densities from the network
+		tcnn::GPUMemory<float> density_grid; // NERF_GRIDSIZE()^3 grid of EMA smoothed densities from the network // Stores not density but s.
 		tcnn::GPUMemory<uint8_t> density_grid_bitfield;
 		uint8_t* get_density_grid_bitfield_mip(uint32_t mip);
 		tcnn::GPUMemory<float> density_grid_mean;

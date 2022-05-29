@@ -86,7 +86,7 @@ public:
 		json local_density_network_config = density_network;
 		local_density_network_config["n_input_dims"] = m_pos_encoding->padded_output_width();
 		if (!density_network.contains("n_output_dims")) {
-			local_density_network_config["n_output_dims"] = 16;
+			local_density_network_config["n_output_dims"] = 16; // Actually 1?
 		}
 		m_density_network.reset(tcnn::create_network<T>(local_density_network_config));
 

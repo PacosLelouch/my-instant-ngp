@@ -1933,7 +1933,7 @@ void Testbed::reset_network() {
 			m_distortion.optimizer.reset(create_optimizer<float>(distortion_map_optimizer_config));
 			m_distortion.trainer = std::make_shared<Trainer<float, float>>(m_distortion.map, m_distortion.optimizer, std::shared_ptr<Loss<float>>{create_loss<float>(loss_config)}, m_seed);
 		}
-	} else if (m_testbed_mode == ETestbedMode::Neus) { // New Neus.
+	} else if (m_testbed_mode == ETestbedMode::Neus) { // New Neus. TODO: TODO: Need SingleVarianceNetwork.
 		m_neus.training.cam_exposure.resize(m_neus.training.dataset.n_images, AdamOptimizer<Array3f>(1e-3f));
 		m_neus.training.cam_pos_offset.resize(m_neus.training.dataset.n_images, AdamOptimizer<Vector3f>(1e-4f));
 		m_neus.training.cam_rot_offset.resize(m_neus.training.dataset.n_images, RotationAdamOptimizer(1e-4f));
@@ -1941,6 +1941,10 @@ void Testbed::reset_network() {
 
 		json& dir_encoding_config = config["dir_encoding"];
 		json& rgb_network_config = config["rgb_network"];
+
+		// New 3 networks, with "network".
+		json& sdf_network_feature_config = config["sdf_network_feature"];
+		json& sdf_network_sdf_config = config["sdf_network_sdf"];
 
 		uint32_t n_dir_dims = 3;
 		uint32_t n_extra_dims = m_neus.training.dataset.has_light_dirs ? 3u : 0u;
@@ -1952,18 +1956,35 @@ void Testbed::reset_network() {
 			encoding_config,
 			dir_encoding_config,
 			network_config,
-			rgb_network_config
+			rgb_network_config,
+			// New 3 networks, with "network".
+			sdf_network_feature_config,
+			sdf_network_sdf_config
 			);
 
 		m_encoding = m_neus_network->encoding();
 		n_encoding_params = m_encoding->n_params() + m_neus_network->dir_encoding()->n_params();
 
 		tlog::info()
-			<< "Density model: " << dims.n_pos
+			<< "SDF hidden model: " << dims.n_pos
 			<< "--[" << std::string(encoding_config["otype"])
 			<< "]-->" << m_neus_network->encoding()->padded_output_width()
 			<< "--[" << std::string(network_config["otype"])
 			<< "(neurons=" << (int)network_config["n_neurons"] << ",layers=" << ((int)network_config["n_hidden_layers"]+2) << ")"
+			<< "]-->" << m_neus_network->sdf_hidden()->padded_output_width()
+			;
+
+		tlog::info()
+			<< "SDF feature model: " << m_neus_network->sdf_feature()->input_width()
+			<< "--[" << std::string(sdf_network_feature_config["otype"])
+			<< "(neurons=" << (int)sdf_network_feature_config["n_neurons"] << ",layers=" << ((int)sdf_network_feature_config["n_hidden_layers"]+2) << ")"
+			<< "]-->" << m_neus_network->sdf_feature()->padded_output_width()
+			;
+
+		tlog::info()
+			<< "SDF sdf model: " << m_neus_network->sdf_sdf()->input_width()
+			<< "--[" << std::string(sdf_network_sdf_config["otype"])
+			<< "(neurons=" << (int)sdf_network_sdf_config["n_neurons"] << ",layers=" << ((int)sdf_network_sdf_config["n_hidden_layers"]+2) << ")"
 			<< "]-->" << 1
 			;
 
