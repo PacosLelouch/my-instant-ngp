@@ -511,9 +511,9 @@ __global__ void grid_samples_half_to_float(const uint32_t n_elements, BoundingBo
 	if (grid_in) {
 		Vector3f pos = unwarp_position(coords_in[i].p, aabb);
 		float grid_density = cascaded_grid_at(pos, grid_in, mip_from_pos(pos));
-		if (grid_density < NERF_MIN_OPTICAL_THICKNESS()) {
-			mlp = -10000.f;
-		}
+		//if (grid_density < NERF_MIN_OPTICAL_THICKNESS()) {
+		//	mlp = -10000.f;
+		//}
 	}
 	dst[i] = mlp;
 }

@@ -46,8 +46,23 @@
 		"activation": "Softplus",
 		"output_activation": "None",
 		"n_neurons": 64,
-        "n_output_dims": 65,
-		"n_hidden_layers": 2
+        "n_output_dims": 64,
+		"n_hidden_layers": 1
+	},
+	"sdf_network_feature": {
+		"otype": "FullyFusedMLP",
+		"activation": "Softplus",
+		"output_activation": "None",
+		"n_neurons": 64,
+        "n_output_dims": 64,
+		"n_hidden_layers": 1
+	},
+	"sdf_network_sdf": {
+		"otype": "FullyFusedMLP",
+		"activation": "Softplus",
+		"output_activation": "None",
+		"n_neurons": 64,
+		"n_hidden_layers": 1
 	},
     "single_variance_network": {
         "otype": "FullyFusedMLP",

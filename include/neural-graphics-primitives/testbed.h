@@ -764,7 +764,7 @@ public:
 
 			bool random_bg_color = true;
 			bool linear_colors = false;
-			ELossType loss_type = ELossType::L2;
+			ELossType loss_type = ELossType::L1; // Loss_color is L1 loss in NeUS.
 			bool snap_to_pixel_centers = true;
 			bool train_envmap = false;
 
@@ -816,7 +816,9 @@ public:
 		tcnn::GPUMemory<Eigen::Array4f> vis_rgba;
 
 		ENerfActivation rgb_activation = ENerfActivation::Exponential;
-		ENerfActivation density_activation = ENerfActivation::Exponential;
+		// sdf_value_activation.
+		ENerfActivation sdf_value_activation = ENerfActivation::Logistic;//ENerfActivation::Exponential;
+		//ENerfActivation pos_gradient_activation = ENerfActivation::None;
 
 		Eigen::Vector3f light_dir = Eigen::Vector3f::Constant(0.5f);
 

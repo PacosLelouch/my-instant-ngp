@@ -200,6 +200,30 @@ inline __device__ float advance_to_next_voxel(float t, float cone_angle, const V
 	return t;
 }
 
+// Begin: Activation function.
+__device__ float activation_function(float val, ENerfActivation activation) {
+	switch (activation) {
+	case ENerfActivation::None: return val;
+	case ENerfActivation::ReLU: return val > 0.0f ? val : 0.0f;
+	case ENerfActivation::Logistic: return tcnn::logistic(val);
+	case ENerfActivation::Exponential: return __expf(val);
+	default: assert(false);
+	}
+	return 0.0f;
+}
+
+__device__ float activation_function_derivative(float val, ENerfActivation activation) {
+	switch (activation) {
+	case ENerfActivation::None: return 1.0f;
+	case ENerfActivation::ReLU: return val > 0.0f ? 1.0f : 0.0f;
+	case ENerfActivation::Logistic: { float density = tcnn::logistic(val); return density * (1 - density); };
+	case ENerfActivation::Exponential: return __expf(tcnn::clamp(val, -15.0f, 15.0f)); // clamp value?
+	default: assert(false);
+	}
+	return 0.0f;
+}
+// End: Activation function.
+
 __device__ float network_to_rgb(float val, ENerfActivation activation) {
 	switch (activation) {
 	case ENerfActivation::None: return val;
@@ -222,7 +246,29 @@ __device__ float network_to_rgb_derivative(float val, ENerfActivation activation
 	return 0.0f;
 }
 
-__device__ float network_to_density(float val, ENerfActivation activation) {
+__device__ float network_to_pos_gradient(float val, ENerfActivation activation) {
+	switch (activation) {
+	case ENerfActivation::None: return val;
+	case ENerfActivation::ReLU: return val > 0.0f ? val : 0.0f;
+	case ENerfActivation::Logistic: return tcnn::logistic(val);
+	case ENerfActivation::Exponential: return __expf(tcnn::clamp(val, -10.0f, 10.0f));
+	default: assert(false);
+	}
+	return 0.0f;
+}
+
+__device__ float network_to_pos_gradient_derivative(float val, ENerfActivation activation) {
+	switch (activation) {
+	case ENerfActivation::None: return 1.0f;
+	case ENerfActivation::ReLU: return val > 0.0f ? 1.0f : 0.0f;
+	case ENerfActivation::Logistic: { float density = tcnn::logistic(val); return density * (1 - density); };
+	case ENerfActivation::Exponential: return __expf(tcnn::clamp(val, -10.0f, 10.0f)); // clamp value?
+	default: assert(false);
+	}
+	return 0.0f;
+}
+
+__device__ float network_to_sdf(float val, ENerfActivation activation) {
 	switch (activation) {
 	case ENerfActivation::None: return val;
 	case ENerfActivation::ReLU: return val > 0.0f ? val : 0.0f;
@@ -233,7 +279,7 @@ __device__ float network_to_density(float val, ENerfActivation activation) {
 	return 0.0f;
 }
 
-__device__ float network_to_density_derivative(float val, ENerfActivation activation) {
+__device__ float network_to_sdf_derivative(float val, ENerfActivation activation) {
 	switch (activation) {
 	case ENerfActivation::None: return 1.0f;
 	case ENerfActivation::ReLU: return val > 0.0f ? 1.0f : 0.0f;
@@ -244,12 +290,34 @@ __device__ float network_to_density_derivative(float val, ENerfActivation activa
 	return 0.0f;
 }
 
-__device__ Array3f network_to_rgb(const tcnn::vector_t<tcnn::network_precision_t, 4>& local_network_output, ENerfActivation activation) {
+__device__ Array3f network_to_rgb(const tcnn::vector_t<tcnn::network_precision_t, 8>& local_network_output, ENerfActivation activation) {
 	return {
 		network_to_rgb(float(local_network_output[0]), activation),
 		network_to_rgb(float(local_network_output[1]), activation),
 		network_to_rgb(float(local_network_output[2]), activation)
 	};
+}
+
+__device__ Array3f network_to_pos_gradient(const tcnn::vector_t<tcnn::network_precision_t, 8>& local_network_output, ENerfActivation activation) {
+	return {
+		network_to_pos_gradient(float(local_network_output[4]), activation),
+		network_to_pos_gradient(float(local_network_output[5]), activation),
+		network_to_pos_gradient(float(local_network_output[6]), activation)
+	};
+}
+
+__device__ float single_variance_sigmoid(float val, float s) {
+	return 1.0f / (1.0f + __expf(-s * val));
+}
+
+__device__ float single_variance_sigmoid_derivative(float val, float s) {
+	float sigmoid_val = single_variance_sigmoid(val, s);
+	return s * sigmoid_val * (1.0f - sigmoid_val);
+}
+
+// dPhi_div_Phi
+__device__ float single_variance_sigmoid_derivative_div_val(float val, float s) {
+	return s * (1.0f - single_variance_sigmoid(val, s));
 }
 
 __device__ Vector3f warp_position(const Vector3f& pos, const BoundingBox& aabb) {
@@ -493,7 +561,7 @@ __global__ void generate_grid_samples_neus_nonuniform(const uint32_t n_elements,
 	indices[i] = idx;
 }
 
-__global__ void splat_grid_samples_neus_max_nearest_neighbor(const uint32_t n_elements, const uint32_t* __restrict__ indices, const tcnn::network_precision_t* network_output, float* __restrict__ grid_out, ENerfActivation rgb_activation, ENerfActivation density_activation) {
+__global__ void splat_grid_samples_neus_max_nearest_neighbor(const uint32_t n_elements, const uint32_t* __restrict__ indices, const tcnn::network_precision_t* network_output, float* __restrict__ grid_out, ENerfActivation rgb_activation, ENerfActivation sdf_value_activation) {
 	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
 	if (i >= n_elements) return;
 
@@ -503,7 +571,7 @@ __global__ void splat_grid_samples_neus_max_nearest_neighbor(const uint32_t n_el
 	// Uncomment for:   optical thickness of the ~expected step size when the observer is in the middle of the scene
 	uint32_t level = 0;//local_idx / (NERF_GRIDSIZE() * NERF_GRIDSIZE() * NERF_GRIDSIZE());
 
-	float mlp = network_to_density(float(network_output[i]), density_activation);
+	float mlp = network_to_sdf(float(network_output[i]), sdf_value_activation);
 	float optical_thickness = mlp * scalbnf(MIN_CONE_STEPSIZE(), level);
 
 	// Positive floats are monotonically ordered when their bit pattern is interpretes as uint.
@@ -511,12 +579,12 @@ __global__ void splat_grid_samples_neus_max_nearest_neighbor(const uint32_t n_el
 	atomicMax((uint32_t*)&grid_out[local_idx], __float_as_uint(optical_thickness));
 }
 
-__global__ void grid_samples_half_to_float(const uint32_t n_elements, BoundingBox aabb, float* dst, const tcnn::network_precision_t* network_output, ENerfActivation density_activation, const NerfPosition* __restrict__ coords_in, const float* __restrict__ grid_in) {
+__global__ void grid_samples_half_to_float(const uint32_t n_elements, BoundingBox aabb, float* dst, const tcnn::network_precision_t* network_output, ENerfActivation sdf_value_activation, const NerfPosition* __restrict__ coords_in, const float* __restrict__ grid_in) {
 	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
 	if (i >= n_elements) return;
 
 	// let's interpolate for marching cubes based on the raw MLP output, not the density (exponentiated) version
-	//float mlp = network_to_density(float(network_output[i * padded_output_width]), density_activation);
+	//float mlp = network_to_sdf(float(network_output[i * padded_output_width]), sdf_value_activation);
 	float mlp = float(network_output[i]);
 
 	if (grid_in) {
@@ -672,12 +740,12 @@ __global__ void generate_neus_network_inputs_at_current_position(const uint32_t 
 }
 
 // TODO: NeUS does not have density...
-__global__ void compute_neus_density(const uint32_t n_elements, Array4f* network_output, ENerfActivation rgb_activation, ENerfActivation density_activation) {
+__global__ void compute_neus_density(const uint32_t n_elements, Array4f* network_output, ENerfActivation rgb_activation, ENerfActivation sdf_value_activation) {
 	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
 	if (i >= n_elements) return;
 
 	Array4f rgba = network_output[i];
-	rgba.w() = tcnn::clamp(1.f - __expf(-network_to_density(rgba.w(), density_activation) / 100.0f), 0.0f, 1.0f);
+	rgba.w() = tcnn::clamp(1.f - __expf(-network_to_sdf(rgba.w(), sdf_value_activation) / 100.0f), 0.0f, 1.0f);
 	rgba.x() = network_to_rgb(rgba.x(), rgb_activation) * rgba.w();
 	rgba.y() = network_to_rgb(rgba.y(), rgb_activation) * rgba.w();
 	rgba.z() = network_to_rgb(rgba.z(), rgb_activation) * rgba.w();
@@ -767,7 +835,7 @@ __global__ void composite_kernel_neus(
 	ERenderMode render_mode,
 	const uint8_t* __restrict__ density_grid,
 	ENerfActivation rgb_activation,
-	ENerfActivation density_activation,
+	ENerfActivation sdf_value_activation,
 	int show_accel,
 	float min_transmittance
 ) {
@@ -779,6 +847,9 @@ __global__ void composite_kernel_neus(
 	if (!payload.alive) {
 		return;
 	}
+	// TEST CONSTANT
+	const float inv_s = __expf(0.03f * 10.0f);
+	const float cos_anneal_ratio = 0.0f;
 
 	Array4f local_rgba = rgba[i];
 	float local_depth = depth[i];
@@ -789,18 +860,45 @@ __global__ void composite_kernel_neus(
 	uint32_t j = 0;
 
 	for (; j < actual_n_steps; ++j) {
-		tcnn::vector_t<tcnn::network_precision_t, 4> local_network_output;
+		tcnn::vector_t<tcnn::network_precision_t, 8> local_network_output;
 		local_network_output[0] = network_output[i + j * n_elements + 0 * stride];
 		local_network_output[1] = network_output[i + j * n_elements + 1 * stride];
 		local_network_output[2] = network_output[i + j * n_elements + 2 * stride];
 		local_network_output[3] = network_output[i + j * n_elements + 3 * stride];
+		local_network_output[4] = network_output[i + j * n_elements + 4 * stride];
+		local_network_output[5] = network_output[i + j * n_elements + 5 * stride];
+		local_network_output[6] = network_output[i + j * n_elements + 6 * stride];
 		const NerfCoordinate* input = network_input(i + j * n_elements);
 		Vector3f warped_pos = input->pos.p;
 		Vector3f pos = unwarp_position(warped_pos, aabb);
+		// alpha, density -> sdf.
+
+		// Begin: NeUS color computation.
+		float sdf_value = float(local_network_output[3]);
+		const Array3f pos_gradient = network_to_pos_gradient(local_network_output, ENerfActivation::None);
+		const Vector3f dir = unwarp_direction(input->dir.d);
+		float dt = unwarp_dt(input->dt);
+		
+
+		float true_cos = (dir[0] * pos_gradient[0] + dir[1] * pos_gradient[1] + dir[2] * pos_gradient[2]);
+		float iter_cos = -(activation_function(-true_cos * 0.5 + 0.5, ENerfActivation::ReLU) * activation_function(1.0 - cos_anneal_ratio, ENerfActivation::ReLU) +
+			activation_function(-true_cos, ENerfActivation::ReLU) * cos_anneal_ratio);
+
+		float estimated_next_sdf = sdf_value + iter_cos * dt * 0.5;
+		float estimated_prev_sdf = sdf_value - iter_cos * dt * 0.5;
+
+		float next_cdf = activation_function(estimated_next_sdf * inv_s, sdf_value_activation);
+		float prev_cdf = activation_function(estimated_prev_sdf * inv_s, sdf_value_activation);
+
+		float p = prev_cdf - next_cdf;
+		float c = prev_cdf;
+		float p_div_c = (p + 1e-5f) / (c + 1e-5f);
+		float alpha = tcnn::clamp(p_div_c, 0.0f, 1.0f);
+		// End: NeUS color computation.
 
 		float T = 1.f - local_rgba.w();
-		float dt = unwarp_dt(input->dt);
-		float alpha = 1.f - __expf(-network_to_density(float(local_network_output[3]), density_activation) * dt);
+		//float dt = unwarp_dt(input->dt);
+		//float alpha = 1.f - __expf(-network_to_sdf(float(local_network_output[3]), sdf_value_activation) * dt);
 		if (show_accel >= 0) {
 			alpha = 1.f;
 		}
@@ -910,7 +1008,7 @@ __global__ void composite_kernel_neus(
 			// Network input contains the gradient of the network output w.r.t. input.
 			// So to compute density gradients, we need to apply the chain rule.
 			// The normal is then in the opposite direction of the density gradient (i.e. the direction of decreasing density)
-			Vector3f normal = -network_to_density_derivative(float(local_network_output[3]), density_activation) * warped_pos;
+			Vector3f normal = -network_to_sdf_derivative(float(local_network_output[3]), sdf_value_activation) * warped_pos;
 			rgb = normal.normalized().array();
 		} else if (render_mode == ERenderMode::Positions) {
 			if (show_accel>=0) {
@@ -1345,7 +1443,7 @@ __global__ void compute_loss_kernel_train_neus(
 	bool max_level_rand_training,
 	float* __restrict__ max_level_compacted_ptr,
 	ENerfActivation rgb_activation,
-	ENerfActivation density_activation,
+	ENerfActivation sdf_value_activation,
 	bool snap_to_pixel_centers,
 	float* __restrict__ error_map,
 	const float* __restrict__ cdf_x_cond_y,
@@ -1364,6 +1462,11 @@ __global__ void compute_loss_kernel_train_neus(
 ) {
 	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
 	if (i >= *rays_counter) { return; }
+
+	// TEST CONSTANT
+	const float inv_s = __expf(0.03f * 10.0f);
+	const float single_variance = 1.0f / inv_s;
+	const float cos_anneal_ratio = 0.0f;
 
 	// grab the number of samples for this ray, and the first sample
 	uint32_t numsteps = numsteps_in[i*2+0];
@@ -1385,16 +1488,36 @@ __global__ void compute_loss_kernel_train_neus(
 			break;
 		}
 
-		const tcnn::vector_t<tcnn::network_precision_t, 4> local_network_output = *(tcnn::vector_t<tcnn::network_precision_t, 4>*)network_output;
+		const tcnn::vector_t<tcnn::network_precision_t, 8> local_network_output = *(tcnn::vector_t<tcnn::network_precision_t, 8>*)network_output;
 		const Array3f rgb = network_to_rgb(local_network_output, rgb_activation);
 		const Vector3f pos = unwarp_position(coords_in.ptr->pos.p, aabb);
 		const float dt = unwarp_dt(coords_in.ptr->dt);
 
-		// TODO: TODO: Not density, but s (single variance). Change to NeUS to compute weight!
-		float density = network_to_density(float(local_network_output[3]), density_activation);
+		// Not density, but sdf value. Change to NeUS to compute weight!
+		float sdf_value = float(local_network_output[3]);// network_to_sdf(float(local_network_output[3]), sdf_value_activation);
 
+		// Begin: NeUS color computation.
+		const Array3f pos_gradient = network_to_pos_gradient(local_network_output, ENerfActivation::None);
+		const Vector3f dir = unwarp_direction(coords_in.ptr->dir.d);
+		
 
-		const float alpha = 1.f - __expf(-density * dt);
+		float true_cos = (dir[0] * pos_gradient[0] + dir[1] * pos_gradient[1] + dir[2] * pos_gradient[2]);
+		float iter_cos = -(activation_function(-true_cos * 0.5 + 0.5, ENerfActivation::ReLU) * activation_function(1.0 - cos_anneal_ratio, ENerfActivation::ReLU) +
+			activation_function(-true_cos, ENerfActivation::ReLU) * cos_anneal_ratio);
+
+		float estimated_next_sdf = sdf_value + iter_cos * dt * 0.5;
+		float estimated_prev_sdf = sdf_value - iter_cos * dt * 0.5;
+
+		float next_cdf = activation_function(estimated_next_sdf * inv_s, sdf_value_activation);
+		float prev_cdf = activation_function(estimated_prev_sdf * inv_s, sdf_value_activation);
+
+		float p = prev_cdf - next_cdf;
+		float c = prev_cdf;
+		float p_div_c = (p + 1e-5f) / (c + 1e-5f);
+		const float alpha = tcnn::clamp(p_div_c, 0.0f, 1.0f); // alpha = 1.f - sigmoid(next_sdf / s) / sigmoid(prev_sdf / s);
+		// End: NeUS color computation.
+
+		//const float alpha = 1.f - __expf(-density * dt);
 		const float weight = alpha * T;
 		rgb_ray += weight * rgb;
 		hitpoint += weight * pos;
@@ -1472,7 +1595,7 @@ __global__ void compute_loss_kernel_train_neus(
 
 	max_level_compacted_ptr += compacted_base;
 	coords_out += compacted_base;
-
+	// TODO: TODO: Other Loss
 	dloss_doutput += compacted_base * padded_output_width;
 
 	LossAndGradient lg = loss_and_gradient(rgbtarget, rgb_ray, loss_type);
@@ -1535,10 +1658,33 @@ __global__ void compute_loss_kernel_train_neus(
 		const NerfCoordinate* coord_in = coords_in(j);
 		coord_out->copy_with_optional_light_dir(*coord_in, coords_out.stride_in_bytes);
 		float dt = unwarp_dt(coord_in->dt);
-		const tcnn::vector_t<tcnn::network_precision_t, 4> local_network_output = *(tcnn::vector_t<tcnn::network_precision_t, 4>*)network_output;
+		const tcnn::vector_t<tcnn::network_precision_t, 8> local_network_output = *(tcnn::vector_t<tcnn::network_precision_t, 8>*)network_output;
 		const Array3f rgb = network_to_rgb(local_network_output, rgb_activation);
-		const float density = network_to_density(float(local_network_output[3]), density_activation);
-		const float alpha = 1.f - __expf(-density * dt);
+
+		const float sdf_value = float(local_network_output[3]);//network_to_sdf(float(local_network_output[3]), sdf_value_activation);
+
+		// Begin: NeUS color computation.
+		const Array3f pos_gradient = network_to_pos_gradient(local_network_output, ENerfActivation::None);
+		const Vector3f dir = unwarp_direction(coord_in->dir.d);
+		
+
+		float true_cos = (dir[0] * pos_gradient[0] + dir[1] * pos_gradient[1] + dir[2] * pos_gradient[2]);
+		float iter_cos = -(activation_function(-true_cos * 0.5 + 0.5, ENerfActivation::ReLU) * activation_function(1.0 - cos_anneal_ratio, ENerfActivation::ReLU) +
+			activation_function(-true_cos, ENerfActivation::ReLU) * cos_anneal_ratio);
+
+		float estimated_next_sdf = sdf_value + iter_cos * dt * 0.5;
+		float estimated_prev_sdf = sdf_value - iter_cos * dt * 0.5;
+
+		float next_cdf = activation_function(estimated_next_sdf * inv_s, sdf_value_activation);
+		float prev_cdf = activation_function(estimated_prev_sdf * inv_s, sdf_value_activation);
+
+		float p = prev_cdf - next_cdf;
+		float c = prev_cdf;
+		float p_div_c = (p + 1e-5f) / (c + 1e-5f);
+		const float alpha = tcnn::clamp(p_div_c, 0.0f, 1.0f);
+		// End: NeUS color computation.
+
+		//const float alpha = 1.f - __expf(-density * dt);
 		const float weight = alpha * T;
 		rgb_ray2 += weight * rgb;
 		T *= (1.f - alpha);
@@ -1547,15 +1693,19 @@ __global__ void compute_loss_kernel_train_neus(
 		const Array3f suffix = rgb_ray - rgb_ray2;
 		const Array3f dloss_by_drgb = weight * lg.gradient;
 
-		tcnn::vector_t<tcnn::network_precision_t, 4> local_dL_doutput;
+		tcnn::vector_t<tcnn::network_precision_t, 8> local_dL_doutput;
 
 		// chain rule to go from dloss/drgb to dloss/dmlp_output
 		local_dL_doutput[0] = loss_scale * (dloss_by_drgb.x() * network_to_rgb_derivative(local_network_output[0], rgb_activation) + fmaxf(0.0f, output_l2_reg * (float)local_network_output[0])); // Penalize way too large color values
 		local_dL_doutput[1] = loss_scale * (dloss_by_drgb.y() * network_to_rgb_derivative(local_network_output[1], rgb_activation) + fmaxf(0.0f, output_l2_reg * (float)local_network_output[1]));
 		local_dL_doutput[2] = loss_scale * (dloss_by_drgb.z() * network_to_rgb_derivative(local_network_output[2], rgb_activation) + fmaxf(0.0f, output_l2_reg * (float)local_network_output[2]));
+		//TODO: TODO: density derivative -> sdf value derivative
 
-		float density_derivative = network_to_density_derivative(float(local_network_output[3]), density_activation);
-		float dloss_by_dmlp = density_derivative * (
+		float sdf_derivative = network_to_sdf_derivative(sdf_value, ENerfActivation::None);
+		float density_raw = -single_variance_sigmoid_derivative_div_val(sdf_value, single_variance) * true_cos;
+		float ddensity_by_dsdf = activation_function_derivative(density_raw, ENerfActivation::ReLU) * density_raw * single_variance_sigmoid_derivative(sdf_value, single_variance);
+		//float density_derivative = network_to_sdf_derivative(float(local_network_output[3]), sdf_value_activation);
+		float dloss_by_dmlp = ddensity_by_dsdf * sdf_derivative * (
 			dt * lg.gradient.matrix().dot((T * rgb - suffix).matrix())
 			);
 
@@ -1568,7 +1718,7 @@ __global__ void compute_loss_kernel_train_neus(
 			(float(local_network_output[3]) > -10.0f && (unwarp_position(coord_in->pos.p, aabb) - origin).norm() < near_distance ? 1e-4f : 0.0f);
 		;
 
-		*(tcnn::vector_t<tcnn::network_precision_t, 4>*)dloss_doutput = local_dL_doutput;
+		*(tcnn::vector_t<tcnn::network_precision_t, 8>*)dloss_doutput = local_dL_doutput;
 
 		dloss_doutput += padded_output_width;
 		network_output += padded_output_width;
@@ -2063,7 +2213,7 @@ uint32_t Testbed::NeusTracer::trace(
 	int visualized_layer,
 	int visualized_dim,
 	ENerfActivation rgb_activation,
-	ENerfActivation density_activation,
+	ENerfActivation sdf_value_activation,
 	int show_accel,
 	float min_transmittance,
 	float glow_y_cutoff,
@@ -2156,7 +2306,7 @@ uint32_t Testbed::NeusTracer::trace(
 			render_mode,
 			grid,
 			rgb_activation,
-			density_activation,
+			sdf_value_activation,
 			show_accel,
 			min_transmittance
 		);
@@ -2267,7 +2417,7 @@ void Testbed::render_neus(CudaRenderBuffer& render_buffer, const Vector2i& max_r
 			m_visualized_layer,
 			m_visualized_dimension,
 			m_neus.rgb_activation,
-			m_neus.density_activation, // TODO: Not density but s.
+			m_neus.sdf_value_activation, // TODO: Not density but s.
 			m_neus.show_accel,
 			m_neus.rendering_min_transmittance,
 			m_neus.m_glow_y_cutoff,
@@ -2293,7 +2443,7 @@ void Testbed::render_neus(CudaRenderBuffer& render_buffer, const Vector2i& max_r
 
 		if (m_visualized_dimension == -1) {
 			m_network->inference(stream, positions_matrix, rgbsigma_matrix);
-			linear_kernel(compute_neus_density, 0, stream, n_hit, m_neus.vis_rgba.data(), m_neus.rgb_activation, m_neus.density_activation);
+			linear_kernel(compute_neus_density, 0, stream, n_hit, m_neus.vis_rgba.data(), m_neus.rgb_activation, m_neus.sdf_value_activation);
 		} else {
 			m_network->visualize_activation(stream, m_visualized_layer, m_visualized_dimension, positions_matrix, rgbsigma_matrix);
 		}
@@ -2649,7 +2799,7 @@ void Testbed::update_density_grid_neus(float decay, uint32_t n_uniform_density_g
 		GPUMatrix<float> density_grid_position_matrix((float*)density_grid_positions, sizeof(NerfPosition)/sizeof(float), n_density_grid_samples);
 		m_neus_network->density(stream, density_grid_position_matrix, density_matrix, false);
 
-		linear_kernel(splat_grid_samples_neus_max_nearest_neighbor, 0, stream, n_density_grid_samples, density_grid_indices, mlp_out, density_grid_tmp, m_neus.rgb_activation, m_neus.density_activation);
+		linear_kernel(splat_grid_samples_neus_max_nearest_neighbor, 0, stream, n_density_grid_samples, density_grid_indices, mlp_out, density_grid_tmp, m_neus.rgb_activation, m_neus.sdf_value_activation);
 		linear_kernel(ema_grid_samples_neus, 0, stream, n_elements, decay, m_neus.density_grid_ema_step, m_neus.density_grid.data(), density_grid_tmp);
 
 		++m_neus.density_grid_ema_step;
@@ -3054,7 +3204,7 @@ void Testbed::train_neus_step(uint32_t target_batch_size, uint32_t n_rays_per_ba
 	if (hg_enc) {
 		hg_enc->set_max_level_gpu(m_max_level_rand_training ? max_level_compacted : nullptr);
 	}
-	//TODO
+
 	linear_kernel(compute_loss_kernel_train_neus, 0, stream,
 		n_rays_per_batch,
 		m_aabb,
@@ -3088,7 +3238,7 @@ void Testbed::train_neus_step(uint32_t target_batch_size, uint32_t n_rays_per_ba
 		m_max_level_rand_training,
 		max_level_compacted,
 		m_neus.rgb_activation,
-		m_neus.density_activation,
+		m_neus.sdf_value_activation,
 		m_neus.training.snap_to_pixel_centers,
 		accumulate_error ? m_neus.training.error_map.data.data() : nullptr,
 		sample_focal_plane_proportional_to_error ? m_neus.training.error_map.cdf_x_cond_y.data() : nullptr,
@@ -3120,7 +3270,8 @@ void Testbed::train_neus_step(uint32_t target_batch_size, uint32_t n_rays_per_ba
 	GPUMatrix<float> coords_gradient_matrix((float*)coords_gradient, floats_per_coord, target_batch_size);
 
 	{
-		auto ctx = m_network->forward(stream, compacted_coords_matrix, &compacted_rgbsigma_matrix, false, train_camera);
+		//auto ctx = m_network->forward(stream, compacted_coords_matrix, &compacted_rgbsigma_matrix, false, train_camera);
+		auto ctx = m_network->forward(stream, compacted_coords_matrix, &compacted_rgbsigma_matrix, false, true); // need input gradients.
 		m_network->backward(stream, *ctx, compacted_coords_matrix, compacted_rgbsigma_matrix, gradient_matrix, train_camera ? &coords_gradient_matrix : nullptr, false, EGradientMode::Overwrite);
 	}
 
@@ -3286,7 +3437,7 @@ GPUMemory<float> Testbed::get_density_on_grid_neus(Vector3i res3d, const Boundin
 			m_aabb,
 			density.data() + offset , //+ axis_step * n_elements,
 			mlp_out,
-			m_neus.density_activation,
+			m_neus.sdf_value_activation,
 			positions + offset,
 			nerf_mode ? m_neus.density_grid.data() : nullptr
 		);
@@ -3316,7 +3467,7 @@ GPUMemory<Eigen::Array4f> Testbed::get_rgba_on_grid_neus(Vector3i res3d, Eigen::
 		m_network->inference(m_inference_stream, positions_matrix, rgbsigma_matrix);
 
 		// convert network output to RGBA (in place)
-		linear_kernel(compute_neus_density, 0, m_inference_stream, local_batch_size, rgba.data() + offset, m_neus.rgb_activation, m_neus.density_activation);
+		linear_kernel(compute_neus_density, 0, m_inference_stream, local_batch_size, rgba.data() + offset, m_neus.rgb_activation, m_neus.sdf_value_activation);
 	}
 	return rgba;
 }

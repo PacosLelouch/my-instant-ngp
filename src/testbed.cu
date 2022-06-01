@@ -1942,9 +1942,10 @@ void Testbed::reset_network() {
 		json& dir_encoding_config = config["dir_encoding"];
 		json& rgb_network_config = config["rgb_network"];
 
-		// New 3 networks, with "network".
-		json& sdf_network_feature_config = config["sdf_network_feature"];
-		json& sdf_network_sdf_config = config["sdf_network_sdf"];
+		// MLP needs hidden layers. This implementation has been deprecated.
+		//// New 3 networks, with "network".
+		//json& sdf_network_feature_config = config["sdf_network_feature"];
+		//json& sdf_network_sdf_config = config["sdf_network_sdf"];
 
 		uint32_t n_dir_dims = 3;
 		uint32_t n_extra_dims = m_neus.training.dataset.has_light_dirs ? 3u : 0u;
@@ -1956,36 +1957,43 @@ void Testbed::reset_network() {
 			encoding_config,
 			dir_encoding_config,
 			network_config,
-			rgb_network_config,
-			// New 3 networks, with "network".
-			sdf_network_feature_config,
-			sdf_network_sdf_config
+			rgb_network_config
 			);
 
 		m_encoding = m_neus_network->encoding();
 		n_encoding_params = m_encoding->n_params() + m_neus_network->dir_encoding()->n_params();
 
+		// MLP needs hidden layers. This implementation has been deprecated.
+		//tlog::info()
+		//	<< "SDF hidden model: " << dims.n_pos
+		//	<< "--[" << std::string(encoding_config["otype"])
+		//	<< "]-->" << m_neus_network->encoding()->padded_output_width()
+		//	<< "--[" << std::string(network_config["otype"])
+		//	<< "(neurons=" << (int)network_config["n_neurons"] << ",layers=" << ((int)network_config["n_hidden_layers"]+2) << ")"
+		//	<< "]-->" << m_neus_network->sdf_hidden()->padded_output_width()
+		//	;
+
+		//tlog::info()
+		//	<< "SDF feature model: " << m_neus_network->sdf_feature()->input_width()
+		//	<< "--[" << std::string(sdf_network_feature_config["otype"])
+		//	<< "(neurons=" << (int)sdf_network_feature_config["n_neurons"] << ",layers=" << ((int)sdf_network_feature_config["n_hidden_layers"]+2) << ")"
+		//	<< "]-->" << m_neus_network->sdf_feature()->padded_output_width()
+		//	;
+
+		//tlog::info()
+		//	<< "SDF sdf model: " << m_neus_network->sdf_sdf()->input_width()
+		//	<< "--[" << std::string(sdf_network_sdf_config["otype"])
+		//	<< "(neurons=" << (int)sdf_network_sdf_config["n_neurons"] << ",layers=" << ((int)sdf_network_sdf_config["n_hidden_layers"]+2) << ")"
+		//	<< "]-->" << 1
+		//	;
+
 		tlog::info()
-			<< "SDF hidden model: " << dims.n_pos
+			<< "SDF model: " << dims.n_pos
 			<< "--[" << std::string(encoding_config["otype"])
 			<< "]-->" << m_neus_network->encoding()->padded_output_width()
 			<< "--[" << std::string(network_config["otype"])
 			<< "(neurons=" << (int)network_config["n_neurons"] << ",layers=" << ((int)network_config["n_hidden_layers"]+2) << ")"
-			<< "]-->" << m_neus_network->sdf_hidden()->padded_output_width()
-			;
-
-		tlog::info()
-			<< "SDF feature model: " << m_neus_network->sdf_feature()->input_width()
-			<< "--[" << std::string(sdf_network_feature_config["otype"])
-			<< "(neurons=" << (int)sdf_network_feature_config["n_neurons"] << ",layers=" << ((int)sdf_network_feature_config["n_hidden_layers"]+2) << ")"
-			<< "]-->" << m_neus_network->sdf_feature()->padded_output_width()
-			;
-
-		tlog::info()
-			<< "SDF sdf model: " << m_neus_network->sdf_sdf()->input_width()
-			<< "--[" << std::string(sdf_network_sdf_config["otype"])
-			<< "(neurons=" << (int)sdf_network_sdf_config["n_neurons"] << ",layers=" << ((int)sdf_network_sdf_config["n_hidden_layers"]+2) << ")"
-			<< "]-->" << 1
+			<< "]-->" << m_neus_network->sdf_network()->padded_output_width() / 2 + 1
 			;
 
 		tlog::info()
@@ -2183,7 +2191,7 @@ void Testbed::train(uint32_t n_training_steps, uint32_t batch_size) {
 			case ETestbedMode::Sdf:    train_sdf(batch_size, n_training_steps, m_training_stream);    break;
 			case ETestbedMode::Image:  train_image(batch_size, n_training_steps, m_training_stream);  break;
 			case ETestbedMode::Volume: train_volume(batch_size, n_training_steps, m_training_stream); break;
-			case ETestbedMode::Neus:   train_neus(batch_size, n_training_steps, m_training_stream);   break; // New train_neus.
+			case ETestbedMode::Neus:   train_neus(batch_size / 4, n_training_steps, m_training_stream);   break; // New train_neus. Since it needs 
 			default: throw std::runtime_error{"Invalid training mode."};
 		}
 
