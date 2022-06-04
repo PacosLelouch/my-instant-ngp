@@ -298,11 +298,24 @@ __device__ Array3f network_to_rgb(const tcnn::vector_t<tcnn::network_precision_t
 	};
 }
 
+// Try to normalize to avoid training.
 __device__ Array3f network_to_pos_gradient(const tcnn::vector_t<tcnn::network_precision_t, 8>& local_network_output, ENerfActivation activation) {
-	return {
+	//return {
+	//	network_to_pos_gradient(float(local_network_output[4]), activation),
+	//	network_to_pos_gradient(float(local_network_output[5]), activation),
+	//	network_to_pos_gradient(float(local_network_output[6]), activation)
+	//};
+	Vector3f raw_gradient{
 		network_to_pos_gradient(float(local_network_output[4]), activation),
 		network_to_pos_gradient(float(local_network_output[5]), activation),
 		network_to_pos_gradient(float(local_network_output[6]), activation)
+	};
+	raw_gradient += Vector3f::Constant(1e-5f);
+	raw_gradient.normalize();
+	return {
+		raw_gradient.x(),
+		raw_gradient.y(),
+		raw_gradient.z()
 	};
 }
 
@@ -1409,7 +1422,7 @@ inline __device__ Array4f read_rgba(Vector2f pos, const Vector2i& resolution, ui
 	return read_val(image_pos(pos, resolution));
 }
 
-// TODO: TODO: compute loss. May change arguments.
+// Compute loss. May change arguments.
 __global__ void compute_loss_kernel_train_neus(
 	const uint32_t n_rays,
 	BoundingBox aabb,
@@ -1765,7 +1778,6 @@ __global__ void compute_loss_kernel_train_neus(
 	}
 }
 
-// TODO: What is cam_gradient?
 __global__ void compute_cam_gradient_train_neus(
 	const uint32_t n_rays,
 	const uint32_t n_rays_total,

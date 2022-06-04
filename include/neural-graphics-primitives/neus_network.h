@@ -26,6 +26,8 @@
 
 #include <tiny-cuda-nn/network_with_input_encoding.h>
 
+#define NEUS_DEBUG_BACKWARD 1
+
 NGP_NAMESPACE_BEGIN
 
 NGP_NEUS_NAMESPACE_BEGIN
@@ -78,7 +80,7 @@ __global__ void extract_rgb(
 	rgb[elem_idx*rgb_stride + dim_idx] = rgbd[elem_idx*output_stride + dim_idx];
 }
 
-// TODO: TODO: .
+// TODO: TODO: is rgbd [4]?
 template <typename T>
 __global__ void add_density_gradient(
 	const uint32_t n_elements,
@@ -427,20 +429,74 @@ public:
 			prepare_input_gradients
 		);
 
-		if (output) { // TODO: Uncaught exception: GPUMatrix must be constructed from a GPUMatrixDynamic with matching layout.
+		if (output) {
+
+#if NEUS_DEBUG_BACKWARD
+			if (output && output->layout() == tcnn::AoS) {
+				// Begin: Debug GPU
+				std::vector<T> output_CPU_debug(output->m());
+				CUDA_CHECK_THROW(cudaMemcpyAsync(output_CPU_debug.data(), output->data(), sizeof(T) * output->m(), cudaMemcpyDeviceToHost, stream));
+				CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+				std::vector<float> output_CPU_debug_float(output->m());
+				for (size_t i = 0; i < output_CPU_debug.size(); ++i) {
+					output_CPU_debug_float[i] = float(output_CPU_debug[i]);
+				}
+				std::cout << (float)output_CPU_debug_float[0] << std::endl;
+				// End: Debug GPU
+			}
+#endif // NEUS_DEBUG_BACKWARD
+
 			// tcnn::GPUMatrixDynamic<T>(data, m, n, layout)
 			forward->rgb_network_output = tcnn::GPUMatrixDynamic<T>{output->data(), m_rgb_network->padded_output_width(), batch_size, output->layout()};
 		}
 
 		forward->rgb_network_ctx = m_rgb_network->forward(stream, forward->rgb_network_input, output ? &forward->rgb_network_output : nullptr, use_inference_params, prepare_input_gradients);
 
+
 		if (output) {
+#if NEUS_DEBUG_BACKWARD
+			// Begin: Debug GPU
+			if (output && output->layout() == tcnn::AoS) {
+				std::vector<T> rgb_network_output_CPU_debug(forward->rgb_network_output.m());
+				CUDA_CHECK_THROW(cudaMemcpyAsync(rgb_network_output_CPU_debug.data(), forward->rgb_network_output.data(), sizeof(T) * forward->rgb_network_output.m(), cudaMemcpyDeviceToHost, stream));
+				CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+				std::vector<float> rgb_network_output_CPU_debug_float(forward->rgb_network_output.m());
+				for (size_t i = 0; i < rgb_network_output_CPU_debug.size(); ++i) {
+					rgb_network_output_CPU_debug_float[i] = float(rgb_network_output_CPU_debug[i]);
+				}
+				std::cout << (float)rgb_network_output_CPU_debug_float[0] << std::endl;
+			}
+			// End: Debug GPU
+#endif // NEUS_DEBUG_BACKWARD
 			tcnn::linear_kernel(extract_sdf_value<T>, 0, stream,
-				batch_size, m_dir_encoding->preferred_output_layout() == tcnn::AoS ? forward->sdf_network_output.stride() : 1, padded_output_width(), forward->sdf_network_output.data() + m_sdf_feature_output_width, output->data()+m_pos_encoding->input_width()//3
+				batch_size,
+				m_dir_encoding->preferred_output_layout() == tcnn::AoS ? forward->sdf_network_output.stride() : 1,
+				output->layout() == tcnn::AoS ? padded_output_width() : 1,
+				forward->sdf_network_output.data() + m_sdf_feature_output_width,
+				output->data() + m_pos_encoding->input_width() * (output->layout() == tcnn::AoS ? 1 : batch_size)
 			);
 			tcnn::linear_kernel(extract_dSDF_dPos<T, float>, 0, stream,
-				batch_size*3, m_pos_encoding->input_width(), padded_output_width(), dSDF_dPos.data(), output->data() + 1 + m_pos_encoding->input_width()//3
+				batch_size*3,
+				m_pos_encoding->input_width(),
+				output->layout() == tcnn::AoS ? padded_output_width() : 1,
+				dSDF_dPos.data(),
+				output->data() + (1 + m_pos_encoding->input_width()) * (output->layout() == tcnn::AoS ? 1 : batch_size)
 			);
+
+#if NEUS_DEBUG_BACKWARD
+			// Begin: Debug GPU
+			if (output && output->layout() == tcnn::AoS) {
+				std::vector<T> output_CPU_debug(output->m());
+				CUDA_CHECK_THROW(cudaMemcpyAsync(output_CPU_debug.data(), output->data(), sizeof(T) * output->m(), cudaMemcpyDeviceToHost, stream));
+				CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+				std::vector<float> output_CPU_debug_float(output->m());
+				for (size_t i = 0; i < output_CPU_debug.size(); ++i) {
+					output_CPU_debug_float[i] = float(output_CPU_debug[i]);
+				}
+				std::cout << (float)output_CPU_debug_float[0] << std::endl;
+			}
+			// End: Debug GPU
+#endif // NEUS_DEBUG_BACKWARD
 		}
 
 		return forward;
@@ -467,10 +523,36 @@ public:
 		tcnn::linear_kernel(extract_rgb<T>, 0, stream,
 			batch_size*3, dL_drgb.m(), dL_doutput.m(), dL_doutput.data(), dL_drgb.data()
 		);
-		// TODO: illegal memory access.
+
+#if NEUS_DEBUG_BACKWARD
+		// Begin: Debug GPU
+		std::vector<T> dL_drgb_CPU_debug(m_rgb_network->padded_output_width());
+		CUDA_CHECK_THROW(cudaMemcpyAsync(dL_drgb_CPU_debug.data(), dL_drgb.data(), sizeof(T) * m_rgb_network->padded_output_width(), cudaMemcpyDeviceToHost, stream));
+		CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+		std::vector<float> dL_drgb_CPU_debug_float(m_rgb_network->padded_output_width());
+		for (size_t i = 0; i < dL_drgb_CPU_debug.size(); ++i) {
+			dL_drgb_CPU_debug_float[i] = float(dL_drgb_CPU_debug[i]);
+		}
+		std::cout << (float)dL_drgb_CPU_debug_float[0] << std::endl;
+		// End: Debug GPU
+#endif // NEUS_DEBUG_BACKWARD
+
 		const tcnn::GPUMatrixDynamic<T> rgb_network_output{(T*)output.data(), m_rgb_network->padded_output_width(), batch_size, output.layout()};
 		tcnn::GPUMatrixDynamic<T> dL_drgb_network_input{m_rgb_network_input_width, batch_size, stream, m_dir_encoding->preferred_output_layout()};
 		m_rgb_network->backward(stream, *forward.rgb_network_ctx, forward.rgb_network_input, rgb_network_output, dL_drgb, &dL_drgb_network_input, use_inference_params, param_gradients_mode);
+
+#if NEUS_DEBUG_BACKWARD
+		// Begin: Debug GPU
+		std::vector<T> dL_drgb_network_input_CPU_debug(m_rgb_network_input_width);
+		CUDA_CHECK_THROW(cudaMemcpyAsync(dL_drgb_network_input_CPU_debug.data(), dL_drgb_network_input.data(), sizeof(T) * m_rgb_network_input_width, cudaMemcpyDeviceToHost, stream));
+		CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+		std::vector<float> dL_drgb_network_input_CPU_debug_float(m_rgb_network_input_width);
+		for (size_t i = 0; i < dL_drgb_network_input_CPU_debug.size(); ++i) {
+			dL_drgb_network_input_CPU_debug_float[i] = float(dL_drgb_network_input_CPU_debug[i]);
+		}
+		std::cout << (float)dL_drgb_network_input_CPU_debug_float[0] << std::endl;
+		// End: Debug GPU
+#endif // NEUS_DEBUG_BACKWARD
 
 		// Backprop through dir encoding if it is trainable or if we need input gradients
 		if (m_dir_encoding->n_params() > 0 || dL_dinput) {
@@ -490,6 +572,19 @@ public:
 				use_inference_params,
 				param_gradients_mode
 			);
+
+#if NEUS_DEBUG_BACKWARD
+			// Begin: Debug GPU
+			std::vector<T> dL_ddir_encoding_input_CPU_debug(m_dir_encoding->input_width());
+			CUDA_CHECK_THROW(cudaMemcpyAsync(dL_ddir_encoding_input_CPU_debug.data(), dL_ddir_encoding_input.data(), sizeof(T) * m_dir_encoding->input_width(), cudaMemcpyDeviceToHost, stream));
+			CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+			std::vector<float> dL_ddir_encoding_input_CPU_debug_float(m_dir_encoding->input_width());
+			for (size_t i = 0; i < dL_ddir_encoding_input_CPU_debug.size(); ++i) {
+				dL_ddir_encoding_input_CPU_debug_float[i] = float(dL_ddir_encoding_input_CPU_debug[i]);
+			}
+			std::cout << (float)dL_ddir_encoding_input_CPU_debug_float[0] << std::endl;
+			// End: Debug GPU
+#endif // NEUS_DEBUG_BACKWARD
 		}
 
 		tcnn::GPUMatrixDynamic<T> dL_dsdf_network_output = dL_drgb_network_input.slice_rows(0, m_sdf_network->padded_output_width());
@@ -501,12 +596,40 @@ public:
 			dL_dsdf_network_output.data()
 		);
 
+#if NEUS_DEBUG_BACKWARD
+		// Begin: Debug GPU
+		std::vector<T> dL_dsdf_network_output_CPU_debug(m_sdf_network->padded_output_width());
+		CUDA_CHECK_THROW(cudaMemcpyAsync(dL_dsdf_network_output_CPU_debug.data(), dL_dsdf_network_output.data(), sizeof(T) * m_sdf_network->padded_output_width(), cudaMemcpyDeviceToHost, stream));
+		CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+		std::vector<float> dL_dsdf_network_output_CPU_debug_float(m_sdf_network->padded_output_width());
+		for (size_t i = 0; i < dL_dsdf_network_output_CPU_debug.size(); ++i) {
+			dL_dsdf_network_output_CPU_debug_float[i] = float(dL_dsdf_network_output_CPU_debug[i]);
+		}
+		std::cout << (float)dL_dsdf_network_output_CPU_debug_float[0] << std::endl;
+		// End: Debug GPU
+#endif // NEUS_DEBUG_BACKWARD
+
 		tcnn::GPUMatrixDynamic<T> dL_dsdf_network_input;
 		if (m_pos_encoding->n_params() > 0 || dL_dinput) {
 			dL_dsdf_network_input = tcnn::GPUMatrixDynamic<T>{m_pos_encoding->padded_output_width(), batch_size, stream, m_pos_encoding->preferred_output_layout()};
 		}
 
 		m_sdf_network->backward(stream, *forward.sdf_network_ctx, forward.sdf_network_input, forward.sdf_network_output, dL_dsdf_network_output, dL_dsdf_network_input.data() ? &dL_dsdf_network_input : nullptr, use_inference_params, param_gradients_mode);
+
+#if NEUS_DEBUG_BACKWARD
+		// Begin: Debug GPU
+		if (dL_dsdf_network_input.m() > 0) {
+			std::vector<T> dL_dsdf_network_input_CPU_debug(m_pos_encoding->padded_output_width());
+			CUDA_CHECK_THROW(cudaMemcpyAsync(dL_dsdf_network_input_CPU_debug.data(), dL_dsdf_network_input.data(), sizeof(T) * m_pos_encoding->padded_output_width(), cudaMemcpyDeviceToHost, stream));
+			CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+			std::vector<float> dL_dsdf_network_input_CPU_debug_float(m_pos_encoding->padded_output_width());
+			for (size_t i = 0; i < dL_dsdf_network_input_CPU_debug.size(); ++i) {
+				dL_dsdf_network_input_CPU_debug_float[i] = float(dL_dsdf_network_input_CPU_debug[i]);
+			}
+			std::cout << (float)dL_dsdf_network_input_CPU_debug_float[0] << std::endl;
+		}
+		// End: Debug GPU
+#endif // NEUS_DEBUG_BACKWARD
 
 		// Backprop through pos encoding if it is trainable or if we need input gradients
 		if (dL_dsdf_network_input.data()) {
@@ -525,6 +648,17 @@ public:
 				use_inference_params,
 				param_gradients_mode
 			);
+
+#if NEUS_DEBUG_BACKWARD
+			if (dL_dinput) {
+				// Begin: Debug GPU
+				std::vector<float> dL_dpos_encoding_input_CPU_debug(m_pos_encoding->input_width());
+				CUDA_CHECK_THROW(cudaMemcpyAsync(dL_dpos_encoding_input_CPU_debug.data(), dL_dpos_encoding_input.data(), sizeof(float) * m_pos_encoding->input_width(), cudaMemcpyDeviceToHost, stream));
+				CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+				std::cout << (float)dL_dpos_encoding_input_CPU_debug[0] << std::endl;
+				// End: Debug GPU
+			}
+#endif // NEUS_DEBUG_BACKWARD
 		}
 	}
 
