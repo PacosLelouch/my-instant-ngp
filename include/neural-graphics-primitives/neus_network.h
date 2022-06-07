@@ -82,17 +82,17 @@ __global__ void extract_rgb(
 
 // TODO: TODO: is rgbd [4]?
 template <typename T>
-__global__ void add_density_gradient(
+__global__ void add_sdf_value_gradient(
 	const uint32_t n_elements,
 	const uint32_t rgbd_stride,
 	const T* __restrict__ rgbd,
-	const uint32_t density_stride,
-	T* __restrict__ density
+	const uint32_t sdf_value_stride,
+	T* __restrict__ sdf_value
 ) {
 	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
 	if (i >= n_elements) return;
 
-	density[i * density_stride] += rgbd[i * rgbd_stride + 3];
+	sdf_value[i * sdf_value_stride] += rgbd[i * rgbd_stride + 3];
 }
 
 template <typename T, typename TInput = T>
@@ -413,11 +413,11 @@ public:
 
 		// rgb_input: feature + pos + gradient + dir_encoding.
 		tcnn::linear_kernel(fill_positions<T, float>, 0, stream,
-			batch_size, m_pos_encoding->input_width(), m_rgb_network_input_width, m_pos_encoding->input_width(),
+			batch_size*m_pos_encoding->input_width(), m_pos_encoding->input_width(), m_rgb_network_input_width, m_pos_encoding->input_width(),
 			input.slice_rows(0, m_pos_encoding->input_width()).data(), forward->rgb_network_input.slice_rows(m_sdf_feature_output_width, m_pos_encoding->input_width()).data());
 
 		tcnn::linear_kernel(fill_positions<T, float>, 0, stream,
-			batch_size, m_pos_encoding->input_width(), m_rgb_network_input_width, m_pos_encoding->input_width(),
+			batch_size*m_pos_encoding->input_width(), m_pos_encoding->input_width(), m_rgb_network_input_width, m_pos_encoding->input_width(),
 			dSDF_dPos.data(), forward->rgb_network_input.slice_rows(m_sdf_feature_output_width + m_pos_encoding->input_width(), m_pos_encoding->input_width()).data());
 
 		auto dir_out = forward->rgb_network_input.slice_rows(m_sdf_feature_output_width + m_pos_encoding->input_width() + m_pos_encoding->input_width(), m_dir_encoding->padded_output_width());
@@ -482,21 +482,6 @@ public:
 				dSDF_dPos.data(),
 				output->data() + (1 + m_pos_encoding->input_width()) * (output->layout() == tcnn::AoS ? 1 : batch_size)
 			);
-
-#if NEUS_DEBUG_BACKWARD
-			// Begin: Debug GPU
-			if (output && output->layout() == tcnn::AoS) {
-				std::vector<T> output_CPU_debug(output->m());
-				CUDA_CHECK_THROW(cudaMemcpyAsync(output_CPU_debug.data(), output->data(), sizeof(T) * output->m(), cudaMemcpyDeviceToHost, stream));
-				CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
-				std::vector<float> output_CPU_debug_float(output->m());
-				for (size_t i = 0; i < output_CPU_debug.size(); ++i) {
-					output_CPU_debug_float[i] = float(output_CPU_debug[i]);
-				}
-				std::cout << (float)output_CPU_debug_float[0] << std::endl;
-			}
-			// End: Debug GPU
-#endif // NEUS_DEBUG_BACKWARD
 		}
 
 		return forward;
@@ -517,6 +502,34 @@ public:
 
 		// Make sure our teporary buffers have the correct size for the given batch size
 		uint32_t batch_size = input.n();
+
+#if NEUS_DEBUG_BACKWARD
+		// Begin: Debug GPU
+		std::vector<T> output_CPU_debug(output.m());
+		std::vector<float> output_CPU_debug_float(output.m());
+		if (output.layout() == tcnn::AoS) {
+			CUDA_CHECK_THROW(cudaMemcpyAsync(output_CPU_debug.data(), output.data(), sizeof(T) * output.m(), cudaMemcpyDeviceToHost, stream));
+			CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+			for (size_t i = 0; i < output_CPU_debug.size(); ++i) {
+				output_CPU_debug_float[i] = float(output_CPU_debug[i]);
+			}
+			std::cout << (float)output_CPU_debug_float[0] << std::endl;
+		}
+		// End: Debug GPU
+#endif // NEUS_DEBUG_BACKWARD
+
+#if NEUS_DEBUG_BACKWARD
+		// Begin: Debug GPU
+		std::vector<T> dL_doutput_CPU_debug(dL_doutput.m());
+		CUDA_CHECK_THROW(cudaMemcpyAsync(dL_doutput_CPU_debug.data(), dL_doutput.data(), sizeof(T) * dL_doutput.m(), cudaMemcpyDeviceToHost, stream));
+		CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+		std::vector<float> dL_doutput_CPU_debug_float(dL_doutput.m());
+		for (size_t i = 0; i < dL_doutput_CPU_debug.size(); ++i) {
+			dL_doutput_CPU_debug_float[i] = float(dL_doutput_CPU_debug[i]);
+		}
+		std::cout << (float)dL_doutput_CPU_debug_float[0] << std::endl;
+		// End: Debug GPU
+#endif // NEUS_DEBUG_BACKWARD
 
 		tcnn::GPUMatrix<T> dL_drgb{m_rgb_network->padded_output_width(), batch_size, stream};
 		CUDA_CHECK_THROW(cudaMemsetAsync(dL_drgb.data(), 0, dL_drgb.n_bytes(), stream));
@@ -556,7 +569,9 @@ public:
 
 		// Backprop through dir encoding if it is trainable or if we need input gradients
 		if (m_dir_encoding->n_params() > 0 || dL_dinput) {
-			tcnn::GPUMatrixDynamic<T> dL_ddir_encoding_output = dL_drgb_network_input.slice_rows(m_sdf_network->padded_output_width(), m_dir_encoding->padded_output_width());
+			//tcnn::GPUMatrixDynamic<T> dL_ddir_encoding_output = dL_drgb_network_input.slice_rows(m_sdf_network->padded_output_width(), m_dir_encoding->padded_output_width());
+			// sdf_feature + pos + grad + dir.
+			tcnn::GPUMatrixDynamic<T> dL_ddir_encoding_output = dL_drgb_network_input.slice_rows(m_sdf_feature_output_width + m_pos_encoding->input_width() + m_pos_encoding->input_width(), m_dir_encoding->padded_output_width());
 			tcnn::GPUMatrixDynamic<float> dL_ddir_encoding_input;
 			if (dL_dinput) {
 				dL_ddir_encoding_input = dL_dinput->slice_rows(m_dir_offset, m_dir_encoding->input_width());
@@ -587,13 +602,27 @@ public:
 #endif // NEUS_DEBUG_BACKWARD
 		}
 
-		tcnn::GPUMatrixDynamic<T> dL_dsdf_network_output = dL_drgb_network_input.slice_rows(0, m_sdf_network->padded_output_width());
-		tcnn::linear_kernel(add_density_gradient<T>, 0, stream,
+		//tcnn::GPUMatrixDynamic<T> dL_dsdf_network_output = dL_drgb_network_input.slice_rows(0, m_sdf_network->padded_output_width());
+		// rgb_network_input: sdf_feature + pos + grad + dir.
+		// sdf_network_output: sdf_feature + sdf_value
+		// Create new buffer to fill in?
+		tcnn::GPUMatrixDynamic<T> dL_dsdf_network_output{ m_sdf_network->padded_output_width(), batch_size, dL_drgb_network_input.layout() };
+		dL_dsdf_network_output.memset_async(stream, 0);
+		tcnn::linear_kernel(fill_positions<T>, 0, stream,
+			batch_size*m_sdf_feature_output_width,
+			dL_drgb_network_input.m(),
+			dL_dsdf_network_output.layout() == tcnn::RM ? 1 : dL_dsdf_network_output.stride(),
+			m_sdf_feature_output_width,
+			dL_drgb_network_input.data(),
+			dL_dsdf_network_output.data()
+		);
+
+		tcnn::linear_kernel(add_sdf_value_gradient<T>, 0, stream,
 			batch_size,
 			dL_doutput.m(),
 			dL_doutput.data(),
 			dL_dsdf_network_output.layout() == tcnn::RM ? 1 : dL_dsdf_network_output.stride(),
-			dL_dsdf_network_output.data()
+			dL_dsdf_network_output.data() + m_sdf_feature_output_width * (dL_dsdf_network_output.layout() == tcnn::CM ? 1 : dL_dsdf_network_output.stride())
 		);
 
 #if NEUS_DEBUG_BACKWARD

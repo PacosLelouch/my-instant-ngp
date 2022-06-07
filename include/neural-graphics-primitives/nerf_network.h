@@ -26,6 +26,8 @@
 
 #include <tiny-cuda-nn/network_with_input_encoding.h>
 
+#define NERF_DEBUG_BACKWARD 1
+
 NGP_NAMESPACE_BEGIN
 
 template <typename T>
@@ -199,11 +201,52 @@ public:
 		// Make sure our teporary buffers have the correct size for the given batch size
 		uint32_t batch_size = input.n();
 
+#if NERF_DEBUG_BACKWARD
+		// Begin: Debug GPU
+		if (output.layout() == tcnn::AoS) {
+			std::vector<T> output_CPU_debug(output.m());
+			CUDA_CHECK_THROW(cudaMemcpyAsync(output_CPU_debug.data(), output.data(), sizeof(T) * output.m(), cudaMemcpyDeviceToHost, stream));
+			CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+			std::vector<float> output_CPU_debug_float(output.m());
+			for (size_t i = 0; i < output_CPU_debug.size(); ++i) {
+				output_CPU_debug_float[i] = float(output_CPU_debug[i]);
+			}
+			std::cout << (float)output_CPU_debug_float[0] << std::endl;
+		}
+		// End: Debug GPU
+#endif // NERF_DEBUG_BACKWARD
+
+#if NERF_DEBUG_BACKWARD
+		// Begin: Debug GPU
+		std::vector<T> dL_doutput_CPU_debug(dL_doutput.m());
+		CUDA_CHECK_THROW(cudaMemcpyAsync(dL_doutput_CPU_debug.data(), dL_doutput.data(), sizeof(T) * dL_doutput.m(), cudaMemcpyDeviceToHost, stream));
+		CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+		std::vector<float> dL_doutput_CPU_debug_float(dL_doutput.m());
+		for (size_t i = 0; i < dL_doutput_CPU_debug.size(); ++i) {
+			dL_doutput_CPU_debug_float[i] = float(dL_doutput_CPU_debug[i]);
+		}
+		std::cout << (float)dL_doutput_CPU_debug_float[0] << std::endl;
+		// End: Debug GPU
+#endif // NERF_DEBUG_BACKWARD
+
 		tcnn::GPUMatrix<T> dL_drgb{m_rgb_network->padded_output_width(), batch_size, stream};
 		CUDA_CHECK_THROW(cudaMemsetAsync(dL_drgb.data(), 0, dL_drgb.n_bytes(), stream));
 		tcnn::linear_kernel(extract_rgb<T>, 0, stream,
 			batch_size*3, dL_drgb.m(), dL_doutput.m(), dL_doutput.data(), dL_drgb.data()
 		);
+
+#if NERF_DEBUG_BACKWARD
+		// Begin: Debug GPU
+		std::vector<T> dL_drgb_CPU_debug(m_rgb_network->padded_output_width());
+		CUDA_CHECK_THROW(cudaMemcpyAsync(dL_drgb_CPU_debug.data(), dL_drgb.data(), sizeof(T) * m_rgb_network->padded_output_width(), cudaMemcpyDeviceToHost, stream));
+		CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+		std::vector<float> dL_drgb_CPU_debug_float(m_rgb_network->padded_output_width());
+		for (size_t i = 0; i < dL_drgb_CPU_debug.size(); ++i) {
+			dL_drgb_CPU_debug_float[i] = float(dL_drgb_CPU_debug[i]);
+		}
+		std::cout << (float)dL_drgb_CPU_debug_float[0] << std::endl;
+		// End: Debug GPU
+#endif // NERF_DEBUG_BACKWARD
 
 		const tcnn::GPUMatrixDynamic<T> rgb_network_output{(T*)output.data(), m_rgb_network->padded_output_width(), batch_size, output.layout()};
 		tcnn::GPUMatrixDynamic<T> dL_drgb_network_input{m_rgb_network_input_width, batch_size, stream, m_dir_encoding->preferred_output_layout()};
@@ -245,6 +288,21 @@ public:
 
 		m_density_network->backward(stream, *forward.density_network_ctx, forward.density_network_input, forward.density_network_output, dL_ddensity_network_output, dL_ddensity_network_input.data() ? &dL_ddensity_network_input : nullptr, use_inference_params, param_gradients_mode);
 
+#if NERF_DEBUG_BACKWARD
+		// Begin: Debug GPU
+		if (dL_ddensity_network_input.m() > 0) {
+			std::vector<T> dL_ddensity_network_input_CPU_debug(m_pos_encoding->padded_output_width());
+			CUDA_CHECK_THROW(cudaMemcpyAsync(dL_ddensity_network_input_CPU_debug.data(), dL_ddensity_network_input.data(), sizeof(T) * m_pos_encoding->padded_output_width(), cudaMemcpyDeviceToHost, stream));
+			CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+			std::vector<float> dL_ddensity_network_input_CPU_debug_float(m_pos_encoding->padded_output_width());
+			for (size_t i = 0; i < dL_ddensity_network_input_CPU_debug.size(); ++i) {
+				dL_ddensity_network_input_CPU_debug_float[i] = float(dL_ddensity_network_input_CPU_debug[i]);
+			}
+			std::cout << (float)dL_ddensity_network_input_CPU_debug_float[0] << std::endl;
+		}
+		// End: Debug GPU
+#endif // NERF_DEBUG_BACKWARD
+
 		// Backprop through pos encoding if it is trainable or if we need input gradients
 		if (dL_ddensity_network_input.data()) {
 			tcnn::GPUMatrixDynamic<float> dL_dpos_encoding_input;
@@ -262,6 +320,16 @@ public:
 				use_inference_params,
 				param_gradients_mode
 			);
+#if NERF_DEBUG_BACKWARD
+			if (dL_dinput) {
+				// Begin: Debug GPU
+				std::vector<float> dL_dpos_encoding_input_CPU_debug(m_pos_encoding->input_width());
+				CUDA_CHECK_THROW(cudaMemcpyAsync(dL_dpos_encoding_input_CPU_debug.data(), dL_dpos_encoding_input.data(), sizeof(float) * m_pos_encoding->input_width(), cudaMemcpyDeviceToHost, stream));
+				CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+				std::cout << (float)dL_dpos_encoding_input_CPU_debug[0] << std::endl;
+				// End: Debug GPU
+			}
+#endif // NERF_DEBUG_BACKWARD
 		}
 	}
 

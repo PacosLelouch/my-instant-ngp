@@ -298,7 +298,7 @@ __device__ Array3f network_to_rgb(const tcnn::vector_t<tcnn::network_precision_t
 	};
 }
 
-// Try to normalize to avoid training.
+// Try to normalize to avoid training?
 __device__ Array3f network_to_pos_gradient(const tcnn::vector_t<tcnn::network_precision_t, 8>& local_network_output, ENerfActivation activation) {
 	//return {
 	//	network_to_pos_gradient(float(local_network_output[4]), activation),
@@ -310,8 +310,8 @@ __device__ Array3f network_to_pos_gradient(const tcnn::vector_t<tcnn::network_pr
 		network_to_pos_gradient(float(local_network_output[5]), activation),
 		network_to_pos_gradient(float(local_network_output[6]), activation)
 	};
-	raw_gradient += Vector3f::Constant(1e-5f);
-	raw_gradient.normalize();
+	//raw_gradient += Vector3f::Constant(1e-5f);
+	//raw_gradient.normalize();
 	return {
 		raw_gradient.x(),
 		raw_gradient.y(),
@@ -905,7 +905,7 @@ __global__ void composite_kernel_neus(
 
 		float p = prev_cdf - next_cdf;
 		float c = prev_cdf;
-		float p_div_c = (p + 1e-5f) / (c + 1e-5f);
+		float p_div_c = p / (c > 1e-5f ? c : 1e-5f); //(p + 1e-5f) / (c + 1e-5f);
 		float alpha = tcnn::clamp(p_div_c, 0.0f, 1.0f);
 		// End: NeUS color computation.
 
@@ -1478,8 +1478,8 @@ __global__ void compute_loss_kernel_train_neus(
 
 	// TEST CONSTANT
 	const float inv_s = __expf(0.03f * 10.0f);
-	const float single_variance = 1.0f / inv_s;
-	const float cos_anneal_ratio = 0.0f;
+	const float single_variance = inv_s;// 1.0f / inv_s;// what is inv?
+	const float cos_anneal_ratio = 1.0f; // 1.0f ? 0.0f ?
 
 	// grab the number of samples for this ray, and the first sample
 	uint32_t numsteps = numsteps_in[i*2+0];
@@ -1521,12 +1521,12 @@ __global__ void compute_loss_kernel_train_neus(
 		float estimated_next_sdf = sdf_value + iter_cos * dt * 0.5;
 		float estimated_prev_sdf = sdf_value - iter_cos * dt * 0.5;
 
-		float next_cdf = activation_function(estimated_next_sdf * inv_s, sdf_value_activation);
+		float next_cdf = activation_function(estimated_next_sdf * inv_s, sdf_value_activation); // TODO: TODO: can it be nan?
 		float prev_cdf = activation_function(estimated_prev_sdf * inv_s, sdf_value_activation);
 
 		float p = prev_cdf - next_cdf;
 		float c = prev_cdf;
-		float p_div_c = (p + 1e-5f) / (c + 1e-5f);
+		float p_div_c = p / (c > 1e-5f ? c : 1e-5f); //(p + 1e-5f) / (c + 1e-5f);
 		const float alpha = tcnn::clamp(p_div_c, 0.0f, 1.0f); // alpha = 1.f - sigmoid(next_sdf / s) / sigmoid(prev_sdf / s);
 		// End: NeUS color computation.
 
@@ -1656,7 +1656,7 @@ __global__ void compute_loss_kernel_train_neus(
 	loss_scale /= n_rays;
 
 	const float output_l2_reg = rgb_activation == ENerfActivation::Exponential ? 1e-4f : 0.0f;
-	const float output_l1_reg_density = *mean_density_ptr < NEUS_MIN_OPTICAL_THICKNESS() ? 1e-4f : 0.0f;
+	const float output_l1_reg_sdf_value = *mean_density_ptr < NEUS_MIN_OPTICAL_THICKNESS() ? 1e-4f : 0.0f;
 
 	// now do it again computing gradients
 	Array3f rgb_ray2 = { 0.f,0.f,0.f };
@@ -1693,7 +1693,7 @@ __global__ void compute_loss_kernel_train_neus(
 
 		float p = prev_cdf - next_cdf;
 		float c = prev_cdf;
-		float p_div_c = (p + 1e-5f) / (c + 1e-5f);
+		float p_div_c = p / (c > 1e-5f ? c : 1e-5f); //(p + 1e-5f) / (c + 1e-5f);
 		const float alpha = tcnn::clamp(p_div_c, 0.0f, 1.0f);
 		// End: NeUS color computation.
 
@@ -1716,20 +1716,26 @@ __global__ void compute_loss_kernel_train_neus(
 
 		float sdf_derivative = network_to_sdf_derivative(sdf_value, ENerfActivation::None);
 		float density_raw = -single_variance_sigmoid_derivative_div_val(sdf_value, single_variance) * true_cos;
-		float ddensity_by_dsdf = activation_function_derivative(density_raw, ENerfActivation::ReLU) * density_raw * single_variance_sigmoid_derivative(sdf_value, single_variance);
+		float ddensity_by_dsdf = activation_function_derivative(density_raw, ENerfActivation::ReLU) * (single_variance * true_cos) * single_variance_sigmoid_derivative(sdf_value, single_variance);
 		//float density_derivative = network_to_sdf_derivative(float(local_network_output[3]), sdf_value_activation);
-		float dloss_by_dmlp = ddensity_by_dsdf * sdf_derivative * (
+		float dloss_by_ddensity = (
 			dt * lg.gradient.matrix().dot((T * rgb - suffix).matrix())
 			);
+		float dloss_by_dmlp = sdf_derivative * ddensity_by_dsdf * dloss_by_ddensity;
 
 		//static constexpr float mask_supervision_strength = 1.f; // we are already 'leaking' mask information into the nerf via the random bg colors; setting this to eg between 1 and  100 encourages density towards 0 in such regions.
 		//dloss_by_dmlp += (texsamp.w()<0.001f) ? mask_supervision_strength * weight : 0.f ;
 
 		local_dL_doutput[3] =
-			loss_scale * dloss_by_dmlp +
-			(float(local_network_output[3]) < 0.0f ? -output_l1_reg_density : 0.0f) +
-			(float(local_network_output[3]) > -10.0f && (unwarp_position(coord_in->pos.p, aabb) - origin).norm() < near_distance ? 1e-4f : 0.0f);
+			loss_scale * dloss_by_dmlp// +
+			//(float(local_network_output[3]) < 0.0f ? -output_l1_reg_sdf_value : 0.0f) +
+			//(float(local_network_output[3]) > -10.0f && (unwarp_position(coord_in->pos.p, aabb) - origin).norm() < near_distance ? 1e-4f : 0.0f);
 		;
+
+		local_dL_doutput[4] = (tcnn::network_precision_t)0.0f;
+		local_dL_doutput[5] = (tcnn::network_precision_t)0.0f;
+		local_dL_doutput[6] = (tcnn::network_precision_t)0.0f;
+		local_dL_doutput[7] = (tcnn::network_precision_t)0.0f;
 
 		*(tcnn::vector_t<tcnn::network_precision_t, 8>*)dloss_doutput = local_dL_doutput;
 
@@ -3280,6 +3286,8 @@ void Testbed::train_neus_step(uint32_t target_batch_size, uint32_t n_rays_per_ba
 
 	bool train_camera = m_neus.training.optimize_extrinsics || m_neus.training.optimize_distortion || m_neus.training.optimize_focal_length;
 	GPUMatrix<float> coords_gradient_matrix((float*)coords_gradient, floats_per_coord, target_batch_size);
+	// Necessary?
+	coords_gradient_matrix.memset_async(stream, 0);
 
 	{
 		//auto ctx = m_network->forward(stream, compacted_coords_matrix, &compacted_rgbsigma_matrix, false, train_camera);
